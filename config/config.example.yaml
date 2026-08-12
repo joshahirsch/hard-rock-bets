@@ -1,0 +1,375 @@
+# =============================================================================
+# Hard Rock Bet research pipeline -- EXAMPLE configuration
+# =============================================================================
+# Copy to config/config.yaml and edit. config/config.yaml is git-ignored.
+#
+# THIS FILE IS A SANITIZED TEMPLATE. Every value below is a placeholder or the
+# spec's own documented default. No real API key, bankroll figure, or
+# spreadsheet ID appears anywhere in this repository.
+#
+# Every numeric constant cites the source document it was ported from. Those
+# documents are the authority; docs/spec.md is a summary; src/ is the
+# executable source of truth for exact behavior.
+#
+# HONEST NOTE, repeated from every source spec: essentially all of these
+# constants are REASONED DEFAULTS, not values fitted to a track record. Change
+# them deliberately, in one place, and record why.
+# =============================================================================
+
+mode:
+  # Shadow mode: this pipeline produces research candidates and logs them.
+  # It NEVER places or authorizes a real wager, and no execution capability
+  # exists anywhere in this codebase.
+  shadow: true
+  # Prompt/version literal stamped into Decision Log column Y.
+  prompt_version: "research-pipeline-v1"
+
+# -----------------------------------------------------------------------------
+# Market math -- claude/market-math-spec.md
+# -----------------------------------------------------------------------------
+market_math:
+  # §4 Composite CLV neutral tolerance band, in percentage points of implied
+  # probability. |delta| < this is treated as price noise / tick granularity.
+  # §7 item 4: a CHOSEN constant; revisit only with >=50 captured closes.
+  neutral_clv_band_pp: 0.5
+
+  # §5 Two-sided implied sum at or below this is a data error and is REJECTED,
+  # never normalized (no real book offers a negative-vig two-sided market).
+  min_overround: 1.0
+
+  # §5 Overround above this is FLAGGED as suspicious (surfaced to the user),
+  # not auto-fatal -- heavy-vig exotics genuinely exist.
+  suspicious_overround: 1.25
+
+  # §5 The two sides of a market must be retrieved within this many minutes of
+  # each other, or the pair is rejected as a non-simultaneous snapshot.
+  max_pair_gap_minutes: 10
+
+  # §5 A price older than this many minutes at evaluation time is stale and
+  # must be rejected / re-fetched. Odds snapshots are same-run only.
+  max_price_age_minutes: 60
+
+# -----------------------------------------------------------------------------
+# Fair-probability estimation -- claude/fair-probability-spec.md
+# -----------------------------------------------------------------------------
+fair_probability:
+  # §2a The priced-in gate. Evidence judged ALREADY PRICED IN carries zero
+  # weight -- it may still be written up as context, but must not enter the
+  # arithmetic. This is the framework's central discipline.
+  priced_in_weights:
+    Y: 0.0            # priced in -> excluded from the arithmetic entirely
+    N: 1.0            # not priced in -> full stated magnitude applies
+    Uncertain: 0.5    # default half-weight; any deviation must be ARGUED
+
+  # §2b Cap on the sum of ABSOLUTE values of the applied weighted magnitudes,
+  # in probability points. If exceeded, EVERY applied adjustment is scaled
+  # proportionally by (cap / raw_sum) -- never by dropping the largest or
+  # smallest, which would silently change what the estimate claims to rest on.
+  adjustment_cap_pp: 8.0
+
+  # §3 Band width = base + freshness_penalty + conflict_penalty, then clamped.
+  band:
+    # base, by the weighted majority of tier composition among NONZERO-weight
+    # adjustments. Tier 3 never contributes weight, so it can never be "the
+    # majority". Implementation note: an exact Tier1/Tier2 tie, and the case of
+    # no applied adjustments at all, both fall to the conservative Tier-2 base.
+    base_tier1_pp: 2.0
+    base_tier2_pp: 4.0
+
+    # freshness_penalty, set by the LEAST-fresh material fact among the
+    # nonzero-weight adjustments.
+    freshness_under_6h_pp: 0.0
+    freshness_6_to_24h_pp: 1.0
+    freshness_unknown_or_stale_pp: 3.0   # "time unknown", or stale >24h unverified
+
+    # conflict_penalty.
+    conflict_agree_pp: 0.0
+    conflict_disagree_pp: 2.0            # some raise, some lower the probability
+    # +1 additional when a single adjustment supplies more than half the net
+    # signed sum while being individually weak -- a fragile foundation.
+    fragile_dominance_pp: 1.0
+    fragile_raw_magnitude_pp: 1.5        # "weak" = raw magnitude strictly under this
+
+    # Clamp. Below the minimum is pinpoint precision the evidence can't support;
+    # above the maximum the estimate does not ship in that form.
+    min_pp: 3.0
+    max_pp: 10.0
+
+  # §4 Pseudo-precision: the point estimate is displayed rounded to the nearest
+  # N pp, and NEVER without its band alongside it.
+  point_rounding_pp: 2.0
+
+  # Ambiguity resolution (see docs/spec.md "Judgment calls"): §9 Demonstration
+  # A derives its band endpoints and its governing edge from the ROUNDED point
+  # estimate (56% -> 51%-61% -> -7.33 pp), not the raw 56.16%. true reproduces
+  # the spec's own worked numbers; false bands the raw point instead.
+  band_from_rounded_point: true
+
+# -----------------------------------------------------------------------------
+# Selection Gate G1-G6 -- claude/selection-gate-spec.md §3
+# -----------------------------------------------------------------------------
+selection_gate:
+  # G1 Edge floor at the CONSERVATIVE (band-low) end, in pp.
+  # LOWERED from 3.00 to 1.50 on 2026-08-11 at the project owner's explicit direction after
+  # 131 candidates produced zero clearances. Honest tension, stated in the
+  # spec itself: 1.50 pp now sits BELOW the framework's own +-3 pp minimum band
+  # width, so a G1-cleared candidate is no longer guaranteed to be
+  # distinguishable from the estimate's own noise floor. Deliberate, not an
+  # oversight.
+  g1_edge_floor_pp: 1.50
+
+  # G2 Band ceiling, in pp -- 60% of the framework's absolute +-10 pp maximum.
+  # EXPLICITLY LEFT UNCHANGED in the 2026-08-11 restructuring; the project owner was offered
+  # this as a loosening option and did not select it.
+  g2_band_ceiling_pp: 6.00
+
+  # G3 has no numeric threshold: every REQUIRED sport-checklist item must be
+  #    explicitly MET (see research_contract.sport_checklists below).
+  # G4 has no numeric threshold: at least one NONZERO-weight adjustment must be
+  #    Tier 1. Also EXPLICITLY LEFT UNCHANGED on 2026-08-11 (the offered
+  #    loosening -- accepting 2+ corroborating Tier-2 sources instead -- was
+  #    not selected).
+  # G5 requires the literal string "SURVIVES".
+  # G6 is fail-closed: ambiguity is NEVER resolved in the candidate's favor.
+
+# -----------------------------------------------------------------------------
+# Correlation / exposure control C1-C3 -- claude/selection-gate-spec.md §5-§6
+# EXPLICITLY NOT part of the 2026-08-11 restructuring; unchanged.
+# -----------------------------------------------------------------------------
+exposure_control:
+  c1_same_day_same_team_cap: 1   # per team per day, regardless of market OR pathway
+  c2_same_thesis_cap: 1          # open entries carrying a given named thesis
+  c3_same_series_cap: 1          # open entries against a given series
+  series_window_days: 7          # "series" = same two teams within a rolling window
+  # Tie-break within one day's batch: higher conservative-end edge wins; if
+  # tied, the earlier write-up position wins.
+  # Precedence: a conflict against a PRIOR day's still-open entry always caps
+  # TODAY's new candidate -- the Decision Log is append-only.
+
+# -----------------------------------------------------------------------------
+# Market-Efficiency Gate GME0-GME6
+# -- claude/market-efficiency-candidate-spec.md §5
+# -----------------------------------------------------------------------------
+market_efficiency_gate:
+  # Scope (§2): MLB moneyline (h2h) ONLY. Do not silently expand -- confirm the
+  # Hard Rock book key actually appears in another sport's feed first.
+  scope_sports: ["mlb"]
+  scope_markets: ["h2h"]
+
+  # GME0 A Tier 1/2 fact published within this many hours that plausibly
+  # explains the divergence BARS this pathway for the rest of the day; the
+  # game routes to the informational pathway instead. This is the one
+  # mandatory check the pathway cannot loosen without recreating exactly the
+  # failure mode it was built to prevent.
+  gme0_news_window_hours: 3
+
+  # GME1 Edge floor, pp. Reuses G1's exact constant by design; lowered from
+  # 3.00 to 1.50 on 2026-08-11 as a mechanical corollary of G1's change.
+  gme1_edge_floor_pp: 1.50
+
+  # GME2 Consensus tightness ceiling, pp. Reuses G2's constant. UNCHANGED.
+  gme2_consensus_spread_ceiling_pp: 6.00
+
+  # GME3 Minimum contributing books (excluding Hard Rock itself), so 5 total
+  # prices. UNCHANGED on 2026-08-11 -- and flagged in the spec as likely the
+  # MORE binding practical constraint than GME1.
+  gme3_min_contributing_books: 4
+
+  # GME4 Leave-one-out: drop the single contributing book whose no-vig
+  #      probability is furthest from the group median, recompute, and require
+  #      the edge to still clear gme1_edge_floor_pp.
+  # GME5 Persistence: the same divergence must be seen on this many separate
+  #      firings the same day before it can reach CLEARED. A first sighting is
+  #      logged as "Market-Efficiency Watch", not as a failure.
+  gme5_required_sightings: 2
+  # GME6 is fail-closed, same philosophy as G6.
+
+# -----------------------------------------------------------------------------
+# Pregame revalidation IC1-IC5 -- claude/revalidation-spec.md §4
+# -----------------------------------------------------------------------------
+invalidation:
+  # IC3 Required edge for the placement-time price floor, in pp. This REUSES
+  # the gate's own G1 floor rather than introducing a second constant, and
+  # tracks G1's value (lowered from 3.00 to 1.50 on 2026-08-11 with G1).
+  ic3_edge_pp: 1.50
+
+  # IC4 Weather thresholds (outdoor-park/pitch candidates only). Reasoned
+  # defaults chosen for concreteness, not calibrated to any track record.
+  ic4_precip_threshold_pct: 50.0   # crossing ABOVE this, where AM was below it
+  ic4_wind_shift_mph: 10.0         # sustained wind speed shift from the AM figure
+  ic4_temp_swing_f: 15.0           # temperature swing from the AM figure
+  # A wind-DIRECTION reversal from the AM forecast also voids. Indoor/dome or
+  # non-weather candidates must state "N/A -- not weather-dependent" explicitly.
+
+# -----------------------------------------------------------------------------
+# Stake sizing -- claude/stake-sizing-spec.md §3
+# -----------------------------------------------------------------------------
+stake_sizing:
+  # suggested_stake = min(flat_stake_usd, floor(bankroll_cap_fraction * bankroll))
+  #                   floored at stake_floor_usd
+  # FLAT, never edge-scaled. No confidence tiers. Informational only -- it is
+  # not an instruction to bet, and nothing here can place a wager.
+  flat_stake_usd: 10.0
+  bankroll_cap_fraction: 0.10
+  stake_floor_usd: 1.0
+  # Only these Final Decision Types carry a suggested stake.
+  eligible_decision_types: ["Research Candidate", "Market-Efficiency Candidate"]
+  # PLACEHOLDER. The real bankroll must never be committed. Supply it at
+  # runtime (env var, request payload, or an ignored config/config.yaml).
+  default_bankroll_usd: 100.0
+
+# -----------------------------------------------------------------------------
+# Odds source -- claude/owls-insight-integration-2026-08-11.md
+# -----------------------------------------------------------------------------
+odds_source:
+  provider: "owls_insight"
+  base_url: "https://api.owlsinsight.com"
+  # Auth is Authorization: Bearer <key> ONLY. A ?apiKey= query param 403s.
+  # The key comes from the OWLS_INSIGHT_API_KEY env var -- never from this file.
+  api_key_env_var: "OWLS_INSIGHT_API_KEY"
+  timeout_seconds: 20
+
+  # Only "mlb" has been live-confirmed on this vendor. Other slugs are guesses
+  # (wnba / mls / nfl / ncaaf?) and must be live-tested one at a time before a
+  # trigger uses them -- guessing is exactly the silent substitution this
+  # project's conventions prohibit.
+  confirmed_sport_keys: ["mlb"]
+
+  # Hard Rock Bet's key on THIS vendor is "hardrock", NOT "hardrockbet"
+  # (hardrockbet was the-odds-api.com's key under regions=us2).
+  hard_rock_book_key: "hardrock"
+
+  # Bookmaker keys to keep. Confirmed live on the v1 MLB feed:
+  # pinnacle, fanduel, draftkings, novig, caesars, betmgm, hardrock, circa,
+  # south_point, wynn, stations.
+  # Keeping hardrock + 5 others satisfies GME3's ">=4 other books" with margin.
+  keep_books: ["hardrock", "pinnacle", "draftkings", "fanduel", "betmgm", "caesars"]
+
+  # Preference order for picking the single reference price for a game.
+  bookmaker_preference: ["hardrock", "draftkings", "fanduel", "betmgm", "caesars", "pinnacle"]
+
+  # Markets to normalize. The v1 relay was moneyline-only because of a 25KB
+  # Storage-by-Zapier cap; this service calls the vendor directly and has no
+  # such cap, so spreads/totals can be enabled here when needed.
+  markets: ["h2h"]
+
+# -----------------------------------------------------------------------------
+# Research contract -- claude/research-contract.md
+# -----------------------------------------------------------------------------
+research_contract:
+  # §2 Source tiers. Tier 3 is DISCOVERY ONLY: it may surface a lead, but may
+  # never be cited as support, never raise an assessment, and never contribute
+  # weight to an adjustment. This is absolute and unchanged.
+  tiers:
+    1: "Primary / official (league API, official injury reports, team announcements, NWS)"
+    2: "Established reporting (NAMED beat writers / news desks, with byline and timestamp)"
+    3: "Pick / consensus sites -- DISCOVERY ONLY, zero weight, never support"
+
+  # §4 Freshness.
+  restale_hours: 24        # facts older than this must be re-verified this run
+  # "time unknown" facts may support PASS or REVALIDATION REQUIRED only.
+
+  # §3a Soft-book / thin-market priced-in guidance (added 2026-08-11).
+  # For in-scope markets, "the fact is publicly known" and "the fact is priced
+  # into Hard Rock Bet's specific line" are DIFFERENT claims. A recent Tier 1/2
+  # fact should default to "Uncertain" rather than automatically "Y" unless
+  # there is specific, articulable evidence Hard Rock's own line already moved.
+  # Deliberately has no numeric threshold -- it is a judgment recalibration.
+  soft_book_priced_in_guidance:
+    in_scope:
+      - "WNBA (any market)"
+      - "MLS (any market)"
+      - "MLB games that are not nationally-televised marquee matchups"
+      - "Any market where Hard Rock Bet's own price is evaluated directly"
+    out_of_scope:
+      - "NFL"
+      - "Nationally-televised marquee MLB games"
+
+  # §5 Sport-specific checklists. REQUIRED items GATE the classification: a
+  # candidate missing one can never be RESEARCH CANDIDATE (it is capped at PASS
+  # or REVALIDATION REQUIRED). SUPPORTING items never gate by themselves.
+  # These names are the keys the /evaluate endpoint expects for G3.
+  sport_checklists:
+    MLB:
+      required:
+        - key: probable_pitchers_confirmed
+          note: >
+            Probable pitchers confirmed by name and date from MLB.com or the
+            official MLB Stats API (statsapi.mlb.com, primary since 2026-07-24)
+            or another Tier 1 source -- never inferred from a rotation pattern
+            or a Tier 3 projection.
+        - key: lineup_timing_honesty
+          note: >
+            Explicitly state that official starting lineups are not yet posted
+            at 8 AM ET (they post 3-4 hours pre-game) and that any
+            lineup-dependent factor is provisional pending revalidation.
+        - key: bullpen_recent_usage
+          conditional: "if bullpen availability is part of the case"
+          note: >
+            Last 2-3 days of relief appearances / pitch counts for both
+            bullpens. Season-aggregate ERA is SUPPORTING at best.
+        - key: weather
+          conditional: "outdoor-park games where weather is cited as a factor"
+          note: >
+            NWS point forecast for the stadium (wind direction/speed,
+            precipitation probability, temperature), or an explicit
+            "weather not a factor in this write-up".
+      supporting:
+        - series/travel context (day game after night game, long road trip, getaway day)
+        - season-long team splits
+        - park factors
+        - umpire assignment
+    WNBA:
+      required:
+        - key: rotation_news
+        - key: small_sample_discipline   # splits under ~10 games are SUPPORTING only
+        - key: no_expansion_split_reasoning
+      supporting: [pace differential, recent form (last 5), travel / back-to-back]
+    MLS:
+      required:
+        - key: confirmed_lineup          # posts ~60-75 min pre-kickoff; usually unmet at 8 AM ET
+        - key: competition_priority_context
+      supporting: [head-to-head trends, BTTS/goals trends, travel, weather, referee tendencies]
+    NFL:
+      required:
+        - key: starting_qb_confirmed
+        - key: official_injury_report_final
+        - key: inactives_timing_honesty  # inactives post ~90 min pre-kickoff
+        - key: weather
+          conditional: "outdoor-stadium games"
+      supporting: [rest differential, divisional familiarity, pace/4th-down tendencies]
+    CFB:
+      required:
+        - key: starting_qb_confirmed
+        - key: injury_report_opacity_acknowledged
+        - key: roster_continuity_check
+          conditional: "bowl / playoff games and active transfer-portal windows"
+        - key: weather
+          conditional: "outdoor-stadium games"
+      supporting: [bye-week rest, lookahead/trap-game context, coaching changes, blue-blood public bias]
+
+# -----------------------------------------------------------------------------
+# Decision Log storage -- Google Sheets
+# -----------------------------------------------------------------------------
+store:
+  provider: "google_sheets"
+  # The REAL spreadsheet ID must never be committed. Supply it via the
+  # GOOGLE_SHEETS_SPREADSHEET_ID env var.
+  spreadsheet_id_env_var: "GOOGLE_SHEETS_SPREADSHEET_ID"
+  credentials_env_var: "GOOGLE_APPLICATION_CREDENTIALS"
+  tab_name: "Decision Log"
+  # Rows are written with values.append (atomic server-side row insertion).
+  # We never read the sheet, count rows, and compute the next index -- that v1
+  # pattern caused real Decision ID collisions.
+  decision_id_scheme: "ulid"     # HRB-YYYYMMDD-<ULID>
+  decision_id_prefix: "HRB"
+  # Columns L and M are formula-owned by the sheet and are ALWAYS written blank.
+  formula_owned_columns: ["L", "M"]
+  append_only: true              # a prior row is never edited retroactively
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  host: "127.0.0.1"
+  port: 8000

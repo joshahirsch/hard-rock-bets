@@ -1,0 +1,325 @@
+"""Google Sheets Decision Log client.
+
+Writes Decision Log rows to the tracker spreadsheet using the real Google
+Sheets API v4.
+
+Two deliberate departures from v1, both of which caused real production bugs:
+
+1. **``values.append`` instead of manual next-row computation.** v1 read the
+   whole sheet, counted rows, and computed the next row index by hand. Two
+   firings overlapping (or a single firing retrying) raced and overwrote each
+   other. ``spreadsheets.values.append`` with
+   ``insertDataOption=INSERT_ROWS`` is a single atomic server-side append --
+   the API picks the row, not us.
+
+2. **ULID Decision IDs instead of "read the sheet, count rows, add one".**
+   The old ``HRB-YYYYMMDD-NN`` scheme derived ``NN`` from a row count, which
+   collided for exactly the same reason. A ULID is generated locally, is
+   globally unique without reading anything, and is lexicographically sortable
+   by creation time -- so the log still sorts chronologically. The legacy
+   human-readable prefix is kept in front of it for continuity.
+
+Columns A-Y are the Phase 1 Decision Log schema, unchanged since.
+
+Sheet-owned columns: L (Market Implied Probability) and M (No-Vig Market
+Probability) are computed by self-expanding array formulas in the sheet and
+MUST be written as empty strings. Putting text in them breaks the spill with
+``#REF!`` (market-math-spec.md §6).
+"""
+
+from __future__ import annotations
+
+import os
+import secrets
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
+
+#: Phase 1 Decision Log schema, columns A-Y in this exact order.
+DECISION_LOG_COLUMNS: Sequence[str] = (
+    "Decision ID",                    # A
+    "Run Date",                       # B
+    "Event",                          # C
+    "Market",                         # D
+    "Side",                           # E
+    "Current Reference Line",         # F
+    "Current Reference Odds",         # G
+    "Odds Source",                    # H
+    "Retrieval Timestamp ET",         # I
+    "Opposing Side Line",             # J
+    "Opposing Side Odds",             # K
+    "Market Implied Probability",     # L  <- SHEET-OWNED, always blank on write
+    "No-Vig Market Probability",      # M  <- SHEET-OWNED, always blank on write
+    "Key Evidence",                   # N
+    "Evidence Sources",               # O
+    "Evidence Publication Times",     # P
+    "Priced-In Assessment",           # Q
+    "Missing Information",            # R
+    "Skeptical Case",                 # S
+    "Invalidation Conditions",        # T
+    "Correlation or Exposure Note",   # U
+    "Gate Outcome",                   # V
+    "Final Decision Type",            # W
+    "Reason for Pass",                # X
+    "Prompt Version",                 # Y
+)
+
+#: Zero-based indices of the two formula-owned columns.
+FORMULA_OWNED_COLUMN_INDICES = (11, 12)  # L, M
+
+DEFAULT_TAB_NAME = "Decision Log"
+SPREADSHEET_ID_ENV_VAR = "GOOGLE_SHEETS_SPREADSHEET_ID"
+CREDENTIALS_ENV_VAR = "GOOGLE_APPLICATION_CREDENTIALS"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+#: ``Final Decision Type`` enum. "Bet" is never valid in shadow mode.
+FINAL_DECISION_TYPES = (
+    "Pass",
+    "Research Candidate",
+    "Revalidation Required",
+    "Market-Efficiency Candidate",
+    "Market-Efficiency Watch",
+)
+
+_CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+class SheetsClientError(RuntimeError):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# ULID
+# ---------------------------------------------------------------------------
+
+
+def generate_ulid(timestamp_ms: Optional[int] = None) -> str:
+    """Generate a ULID: 48-bit ms timestamp + 80 bits of randomness, Crockford b32.
+
+    Sortable by creation time, unique without reading anything. This replaces
+    v1's read-count-increment Decision ID scheme, which produced real
+    collisions when two firings overlapped.
+    """
+    ts = int(time.time() * 1000) if timestamp_ms is None else int(timestamp_ms)
+    if not (0 <= ts < (1 << 48)):
+        raise ValueError("timestamp out of ULID range")
+    rand = secrets.randbits(80)
+    value = (ts << 80) | rand
+    chars = []
+    for i in range(25, -1, -1):
+        chars.append(_CROCKFORD32[(value >> (i * 5)) & 0x1F])
+    return "".join(chars)
+
+
+def generate_decision_id(run_date: str, prefix: str = "HRB") -> str:
+    """``HRB-YYYYMMDD-<ULID>`` -- human-scannable prefix, collision-free suffix.
+
+    ``run_date`` is ``YYYY-MM-DD``.
+    """
+    return f"{prefix}-{run_date.replace('-', '')}-{generate_ulid()}"
+
+
+# ---------------------------------------------------------------------------
+# Row model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DecisionLogRow:
+    """One Decision Log row. Field order matches ``DECISION_LOG_COLUMNS``."""
+
+    decision_id: str
+    run_date: str
+    event: str
+    market: str
+    side: str
+    current_reference_line: str = ""
+    current_reference_odds: str = ""
+    odds_source: str = ""
+    retrieval_timestamp_et: str = ""
+    opposing_side_line: str = ""
+    opposing_side_odds: str = ""
+    key_evidence: str = ""
+    evidence_sources: str = ""
+    evidence_publication_times: str = ""
+    priced_in_assessment: str = ""
+    missing_information: str = ""
+    skeptical_case: str = ""
+    invalidation_conditions: str = ""
+    correlation_or_exposure_note: str = ""
+    gate_outcome: str = ""
+    final_decision_type: str = "Pass"
+    reason_for_pass: str = ""
+    prompt_version: str = ""
+
+    def to_values(self) -> List[str]:
+        """Render as an A-Y value list with L and M left blank for the sheet.
+
+        Every cell is forced single-line: tabs and newlines are replaced with
+        "; " because the log's cells are one-line by convention.
+        """
+        if self.final_decision_type not in FINAL_DECISION_TYPES:
+            raise SheetsClientError(
+                f"invalid Final Decision Type {self.final_decision_type!r}; "
+                f"expected one of {FINAL_DECISION_TYPES}"
+            )
+        values = [
+            self.decision_id,
+            self.run_date,
+            self.event,
+            self.market,
+            self.side,
+            self.current_reference_line,
+            self.current_reference_odds,
+            self.odds_source,
+            self.retrieval_timestamp_et,
+            self.opposing_side_line,
+            self.opposing_side_odds,
+            "",  # L -- formula-owned
+            "",  # M -- formula-owned
+            self.key_evidence,
+            self.evidence_sources,
+            self.evidence_publication_times,
+            self.priced_in_assessment,
+            self.missing_information,
+            self.skeptical_case,
+            self.invalidation_conditions,
+            self.correlation_or_exposure_note,
+            self.gate_outcome,
+            self.final_decision_type,
+            self.reason_for_pass,
+            self.prompt_version,
+        ]
+        assert len(values) == len(DECISION_LOG_COLUMNS)
+        return [_single_line(v) for v in values]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _single_line(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\t", "; ").replace("\r", " ").replace("\n", "; ").strip()
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+class DecisionLogSheetsClient:
+    """Append-only Decision Log writer.
+
+    The Decision Log is append-only by project convention: a prior row is never
+    edited retroactively to reflect a later day's conflict
+    (selection-gate-spec.md §6). This class exposes no update or delete method
+    on purpose.
+    """
+
+    def __init__(
+        self,
+        spreadsheet_id: Optional[str] = None,
+        tab_name: str = DEFAULT_TAB_NAME,
+        credentials_path: Optional[str] = None,
+        service: Any = None,
+    ) -> None:
+        self.spreadsheet_id = spreadsheet_id or os.environ.get(SPREADSHEET_ID_ENV_VAR)
+        if not self.spreadsheet_id:
+            raise SheetsClientError(
+                f"missing spreadsheet id: set {SPREADSHEET_ID_ENV_VAR} in the "
+                "environment (never commit the real id -- see .env.example)"
+            )
+        self.tab_name = tab_name
+        self.credentials_path = credentials_path or os.environ.get(CREDENTIALS_ENV_VAR)
+        self._service = service
+
+    # -- wiring ------------------------------------------------------------
+    def _values_api(self):
+        if self._service is None:
+            self._service = self._build_service()
+        return self._service.spreadsheets().values()
+
+    def _build_service(self):  # pragma: no cover - requires real credentials
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+        except ImportError as exc:
+            raise SheetsClientError(
+                "google-api-python-client and google-auth are required; "
+                "`pip install -r requirements.txt`"
+            ) from exc
+        if not self.credentials_path:
+            raise SheetsClientError(
+                f"missing service-account credentials: set {CREDENTIALS_ENV_VAR}"
+            )
+        creds = service_account.Credentials.from_service_account_file(
+            self.credentials_path, scopes=[SHEETS_SCOPE]
+        )
+        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    # -- writes ------------------------------------------------------------
+    def append_rows(self, rows: Sequence[DecisionLogRow]) -> Dict[str, Any]:
+        """Atomically append rows with ``spreadsheets.values.append``.
+
+        ``insertDataOption=INSERT_ROWS`` makes the server choose the insertion
+        point, so concurrent firings cannot collide. We never compute a row
+        index ourselves.
+
+        ``valueInputOption=RAW`` keeps evidence text from being reinterpreted
+        as a formula or a date by the sheet.
+        """
+        if not rows:
+            return {"updates": {"updatedRows": 0}}
+        body = {"values": [r.to_values() for r in rows]}
+        request = self._values_api().append(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{self.tab_name}!A1",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            includeValuesInResponse=False,
+            body=body,
+        )
+        return request.execute()
+
+    def append_row(self, row: DecisionLogRow) -> Dict[str, Any]:
+        return self.append_rows([row])
+
+    # -- reads -------------------------------------------------------------
+    def read_rows(self, max_rows: int = 5000) -> List[Dict[str, str]]:
+        """Read back the Decision Log as dicts keyed by column name.
+
+        Used for the C1-C3 open-exposure read-back (selection-gate-spec.md §6
+        step 1). Note the spec's own limitation §9 item 5: this read-back is
+        the single point of failure for cross-day correlation checks.
+        """
+        last_col = _column_letter(len(DECISION_LOG_COLUMNS))
+        request = self._values_api().get(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{self.tab_name}!A2:{last_col}{max_rows + 1}",
+            valueRenderOption="UNFORMATTED_VALUE",
+        )
+        values = request.execute().get("values", [])
+        out: List[Dict[str, str]] = []
+        for raw in values:
+            padded = list(raw) + [""] * (len(DECISION_LOG_COLUMNS) - len(raw))
+            out.append(dict(zip(DECISION_LOG_COLUMNS, padded)))
+        return out
+
+    def ensure_header(self) -> Dict[str, Any]:
+        """Write the A-Y header row. Safe to call on a fresh, empty tab only."""
+        request = self._values_api().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{self.tab_name}!A1",
+            valueInputOption="RAW",
+            body={"values": [list(DECISION_LOG_COLUMNS)]},
+        )
+        return request.execute()
+
+
+def _column_letter(index_1_based: int) -> str:
+    letters = ""
+    n = index_1_based
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
