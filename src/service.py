@@ -63,10 +63,15 @@ from src.math.novig import (
 )
 from src.store.sheets_client import (
     CREDENTIALS_ENV_VAR,
+    FINAL_DECISION_TYPES,
     OAUTH_CLIENT_ID_ENV_VAR,
     OAUTH_CLIENT_SECRET_ENV_VAR,
     OAUTH_REFRESH_TOKEN_ENV_VAR,
     SPREADSHEET_ID_ENV_VAR,
+    DecisionLogRow,
+    DecisionLogSheetsClient,
+    SheetsClientError,
+    generate_decision_id,
 )
 
 app = FastAPI(
@@ -632,4 +637,132 @@ def stake(req: StakeRequest) -> Dict[str, Any]:
         "amount_usd": suggestion.amount_usd,
         "binding_constraint": suggestion.binding_constraint,
         "text": suggestion.text,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /decision-log
+#
+# Deliberately separate from /evaluate. /evaluate is a pure computation (per
+# the README: "the whole deterministic pipeline in one call ... returns ...
+# ready-to-write Decision Log cells") with no side effects -- writing is an
+# explicit second step, so a caller can inspect a verdict before deciding
+# whether, and with what final narrative fields, to log it. Until this
+# existed, GOOGLE_SHEETS_SPREADSHEET_ID/credentials being configured had no
+# effect on anything: sheets_client.py was fully built and tested but never
+# called from the running service.
+# ---------------------------------------------------------------------------
+
+
+def _decision_log_client() -> DecisionLogSheetsClient:
+    try:
+        return DecisionLogSheetsClient()
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+class DecisionLogAppendRequest(BaseModel):
+    """One Decision Log row. Field names mirror DECISION_LOG_COLUMNS.
+
+    No ``decision_id`` field on purpose: it's generated server-side (a ULID
+    via ``generate_decision_id``) so nothing has to read the sheet or guess a
+    suffix to avoid collisions -- the entire reason v2 moved off
+    "read the sheet, count rows, add one" (sheets_client.py module docstring).
+    """
+
+    run_date: str = Field(
+        ..., description="YYYY-MM-DD, the agent's own ET business-day date"
+    )
+    event: str
+    market: str
+    side: str
+    current_reference_line: str = ""
+    current_reference_odds: str = ""
+    odds_source: str = ""
+    retrieval_timestamp_et: str = ""
+    opposing_side_line: str = ""
+    opposing_side_odds: str = ""
+    key_evidence: str = ""
+    evidence_sources: str = ""
+    evidence_publication_times: str = ""
+    priced_in_assessment: str = ""
+    missing_information: str = ""
+    skeptical_case: str = ""
+    invalidation_conditions: str = ""
+    correlation_or_exposure_note: str = ""
+    gate_outcome: str = ""
+    final_decision_type: str = "Pass"
+    reason_for_pass: str = ""
+    prompt_version: str = ""
+
+
+@app.post("/decision-log/append")
+def append_decision_log(req: DecisionLogAppendRequest) -> Dict[str, Any]:
+    """Atomically append one row to the live Decision Log."""
+    if req.final_decision_type not in FINAL_DECISION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"invalid final_decision_type {req.final_decision_type!r}; "
+                f"expected one of {FINAL_DECISION_TYPES}"
+            ),
+        )
+    client = _decision_log_client()
+    decision_id = generate_decision_id(req.run_date)
+    row = DecisionLogRow(
+        decision_id=decision_id,
+        run_date=req.run_date,
+        event=req.event,
+        market=req.market,
+        side=req.side,
+        current_reference_line=req.current_reference_line,
+        current_reference_odds=req.current_reference_odds,
+        odds_source=req.odds_source,
+        retrieval_timestamp_et=req.retrieval_timestamp_et,
+        opposing_side_line=req.opposing_side_line,
+        opposing_side_odds=req.opposing_side_odds,
+        key_evidence=req.key_evidence,
+        evidence_sources=req.evidence_sources,
+        evidence_publication_times=req.evidence_publication_times,
+        priced_in_assessment=req.priced_in_assessment,
+        missing_information=req.missing_information,
+        skeptical_case=req.skeptical_case,
+        invalidation_conditions=req.invalidation_conditions,
+        correlation_or_exposure_note=req.correlation_or_exposure_note,
+        gate_outcome=req.gate_outcome,
+        final_decision_type=req.final_decision_type,
+        reason_for_pass=req.reason_for_pass,
+        prompt_version=req.prompt_version,
+    )
+    try:
+        result = client.append_rows([row])
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "banner": SHADOW_MODE_BANNER,
+        "decision_id": decision_id,
+        "sheets_response": result,
+    }
+
+
+@app.get("/decision-log")
+def read_decision_log(max_rows: int = 5000) -> Dict[str, Any]:
+    """Read back the live Decision Log.
+
+    This is the C1-C3 open-exposure source of truth (selection-gate-spec.md
+    §6 step 1): exposure control needs current open entries (Final Decision
+    Type = Research Candidate / Market-Efficiency Candidate, event not yet
+    started) read fresh every firing. Previously every trigger fetched this
+    itself via a separate Drive/Sheets connector call outside the service;
+    this exposes the same tested read path append_decision_log writes through.
+    """
+    client = _decision_log_client()
+    try:
+        rows = client.read_rows(max_rows=max_rows)
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "banner": SHADOW_MODE_BANNER,
+        "row_count": len(rows),
+        "rows": rows,
     }

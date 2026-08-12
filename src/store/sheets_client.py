@@ -69,6 +69,10 @@ FORMULA_OWNED_COLUMN_INDICES = (11, 12)  # L, M
 
 DEFAULT_TAB_NAME = "Decision Log"
 SPREADSHEET_ID_ENV_VAR = "GOOGLE_SHEETS_SPREADSHEET_ID"
+#: Was documented in .env.example / DEPLOY.md and set as a real Fly secret
+#: from the start, but never actually read anywhere until now -- tab_name
+#: silently always fell back to DEFAULT_TAB_NAME regardless of this var.
+TAB_NAME_ENV_VAR = "GOOGLE_SHEETS_DECISION_LOG_TAB"
 CREDENTIALS_ENV_VAR = "GOOGLE_APPLICATION_CREDENTIALS"
 #: OAuth alternative to a service-account key -- see
 #: scripts/get_oauth_refresh_token.py. Used only if CREDENTIALS_ENV_VAR isn't
@@ -229,7 +233,7 @@ class DecisionLogSheetsClient:
     def __init__(
         self,
         spreadsheet_id: Optional[str] = None,
-        tab_name: str = DEFAULT_TAB_NAME,
+        tab_name: Optional[str] = None,
         credentials_path: Optional[str] = None,
         oauth_client_id: Optional[str] = None,
         oauth_client_secret: Optional[str] = None,
@@ -242,7 +246,9 @@ class DecisionLogSheetsClient:
                 f"missing spreadsheet id: set {SPREADSHEET_ID_ENV_VAR} in the "
                 "environment (never commit the real id -- see .env.example)"
             )
-        self.tab_name = tab_name
+        self.tab_name = (
+            tab_name or os.environ.get(TAB_NAME_ENV_VAR) or DEFAULT_TAB_NAME
+        )
         self.credentials_path = credentials_path or os.environ.get(CREDENTIALS_ENV_VAR)
         self.oauth_client_id = oauth_client_id or os.environ.get(OAUTH_CLIENT_ID_ENV_VAR)
         self.oauth_client_secret = oauth_client_secret or os.environ.get(
