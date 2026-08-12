@@ -125,6 +125,15 @@ def _describe_api_exception(exc: Exception) -> str:
     text = str(exc).strip()
     if text and text not in parts:
         parts.append(text)
+    # HttpError carries the actual request URI it was raised for (the range
+    # is URL-encoded into the query string for a values.get/append/update
+    # call). Surfacing it turns "the range was somehow malformed" from a
+    # guessing game into something visibly checkable in the error itself --
+    # e.g. a stray %22 (a literal ") or %27%27...%27%27 (double-quoting)
+    # right in the range parameter.
+    uri = getattr(exc, "uri", None)
+    if uri:
+        parts.append(f"request URI: {uri}")
     return ": ".join(parts) if len(parts) > 1 else f"{parts[0]} (no further detail available)"
 
 
@@ -272,7 +281,7 @@ class DecisionLogSheetsClient:
                 f"missing spreadsheet id: set {SPREADSHEET_ID_ENV_VAR} in the "
                 "environment (never commit the real id -- see .env.example)"
             )
-        self.tab_name = (
+        self.tab_name = _normalize_tab_name(
             tab_name or os.environ.get(TAB_NAME_ENV_VAR) or DEFAULT_TAB_NAME
         )
         self.credentials_path = credentials_path or os.environ.get(CREDENTIALS_ENV_VAR)
@@ -436,6 +445,27 @@ def _column_letter(index_1_based: int) -> str:
         n, rem = divmod(n - 1, 26)
         letters = chr(65 + rem) + letters
     return letters
+
+
+def _normalize_tab_name(raw: str) -> str:
+    """Strip incidental whitespace and an accidental wrapping quote pair.
+
+    Defends against a real footgun in how ``GOOGLE_SHEETS_DECISION_LOG_TAB``
+    gets set: on a value containing a space (the default, "Decision Log"),
+    it's easy for a shell command or copy-paste to leave the literal quote
+    characters baked into the secret's value itself -- e.g. the stored value
+    becomes ``"Decision Log"`` or ``'Decision Log'``, quote characters and
+    all, rather than just ``Decision Log``. If that unnoticed value were
+    handed to ``_a1_range`` as-is, its already-non-alphanumeric content would
+    get quoted *again*, producing a mangled range Google rejects with the
+    same generic 400 INVALID_ARGUMENT this whole issue chain traces back to.
+    Stripping a single matched pair of wrapping quotes (and any surrounding
+    whitespace) here means a bad copy-paste can't silently break every call.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
 
 
 #: Sheet/tab names made only of these characters never need quoting in A1

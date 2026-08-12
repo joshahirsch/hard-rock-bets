@@ -18,6 +18,7 @@ from src.store.sheets_client import (
     DecisionLogSheetsClient,
     SheetsClientError,
     _a1_range,
+    _normalize_tab_name,
     generate_decision_id,
     generate_ulid,
 )
@@ -212,6 +213,48 @@ def test_a1_range_escapes_an_embedded_single_quote():
     assert _a1_range("Josh's Log", "A1") == "'Josh''s Log'!A1"
 
 
+# ---------------------------------------------------------------------------
+# Tab-name normalization
+#
+# A footgun: setting GOOGLE_SHEETS_DECISION_LOG_TAB via a shell command whose
+# value contains a space can leave literal quote characters baked into the
+# stored value itself (e.g. it becomes `"Decision Log"`, quotes included,
+# instead of `Decision Log`). Handed to _a1_range unnoticed, that
+# already-non-alphanumeric value gets quoted AGAIN -> a mangled range ->
+# the same generic 400 INVALID_ARGUMENT. DecisionLogSheetsClient.__init__
+# normalizes away exactly this before it ever reaches _a1_range.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tab_name_strips_wrapping_double_quotes():
+    assert _normalize_tab_name('"Decision Log"') == "Decision Log"
+
+
+def test_normalize_tab_name_strips_wrapping_single_quotes():
+    assert _normalize_tab_name("'Decision Log'") == "Decision Log"
+
+
+def test_normalize_tab_name_strips_incidental_whitespace():
+    assert _normalize_tab_name("  Decision Log  \n") == "Decision Log"
+
+
+def test_normalize_tab_name_leaves_a_clean_value_untouched():
+    assert _normalize_tab_name("Decision Log") == "Decision Log"
+
+
+def test_normalize_tab_name_does_not_strip_an_unmatched_quote():
+    # Only strip a genuine wrapping PAIR -- a single stray quote character is
+    # data, not accidental shell quoting, and stripping it would be wrong.
+    assert _normalize_tab_name("Josh's Log") == "Josh's Log"
+
+
+def test_client_normalizes_a_quoted_tab_name_from_the_environment(monkeypatch):
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    monkeypatch.setenv("GOOGLE_SHEETS_DECISION_LOG_TAB", '"Decision Log"')
+    c = DecisionLogSheetsClient()
+    assert c.tab_name == "Decision Log"
+
+
 def test_client_exposes_no_update_or_delete_for_existing_rows():
     # The Decision Log is append-only: a prior row is never edited
     # retroactively (selection-gate-spec.md §6).
@@ -307,10 +350,11 @@ class _HttpErrorLike(Exception):
     reproduces that shape so _describe_api_exception is tested against it.
     """
 
-    def __init__(self, status, content, str_repr=""):
+    def __init__(self, status, content, str_repr="", uri=None):
         super().__init__(str_repr)
         self.resp = _Resp(status)
         self.content = content
+        self.uri = uri
 
     def __str__(self):
         return ""  # reproduces the observed empty stringification
@@ -331,6 +375,24 @@ def test_http_error_with_empty_str_still_surfaces_status_and_body(client):
     # with nothing useful after it -- exactly what showed up live.
     assert "HTTP 403" in message
     assert "does not have permission" in message
+
+
+def test_http_error_surfaces_the_actual_request_uri(client):
+    # The request URI shows the literal range Google received (URL-encoded)
+    # -- turning "the range was somehow malformed" from a guess into
+    # something visible in the error itself, e.g. double-quoting from a
+    # mangled tab name.
+    c, api = client
+    bad_uri = (
+        "https://sheets.googleapis.com/v4/spreadsheets/TEST_SHEET_ID/values/"
+        "%27%27%27Decision%20Log%27%27%27%21A2%3AY5001"
+    )
+    api.get = lambda **kwargs: _RaisingExecutable(
+        _HttpErrorLike(400, b'{"error": {"message": "Request contains an invalid argument"}}', uri=bad_uri)
+    )
+    with pytest.raises(SheetsClientError) as exc_info:
+        c.read_rows()
+    assert bad_uri in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
