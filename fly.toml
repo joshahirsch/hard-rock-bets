@@ -1,0 +1,39 @@
+# Fly.io app config for the hard-rock-bets deterministic research service.
+#
+# First deploy:
+#   fly auth login
+#   fly launch --no-deploy --copy-config --name <your-unique-app-name>
+#   fly secrets set OWLS_INSIGHT_API_KEY=... \
+#                   GOOGLE_SHEETS_SPREADSHEET_ID=... \
+#                   GOOGLE_SHEETS_DECISION_LOG_TAB="Decision Log" \
+#                   GOOGLE_APPLICATION_CREDENTIALS_JSON="$(cat /path/to/service-account.json)" \
+#                   BANKROLL_USD=...
+#   fly deploy
+#
+# `app` below is a placeholder — `fly launch` will prompt to rename it to
+# something globally unique on Fly (app names are shared across all Fly
+# users), or pass --name explicitly as above.
+
+app = "hard-rock-bets"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
