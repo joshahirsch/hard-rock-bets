@@ -262,7 +262,19 @@ class DecisionLogSheetsClient:
     # -- wiring ------------------------------------------------------------
     def _values_api(self):
         if self._service is None:
-            self._service = self._build_service()
+            try:
+                self._service = self._build_service()
+            except SheetsClientError:
+                raise
+            except Exception as exc:
+                # Anything other than our own SheetsClientError -- e.g. a
+                # discovery-doc fetch failure -- was previously escaping
+                # uncaught and surfacing as a bare 500 with no detail. Wrap it
+                # so callers (service.py's 503 handler) see what actually
+                # went wrong.
+                raise SheetsClientError(
+                    f"failed to build Sheets API client: {type(exc).__name__}: {exc}"
+                ) from exc
         return self._service.spreadsheets().values()
 
     @property
@@ -335,7 +347,7 @@ class DecisionLogSheetsClient:
             includeValuesInResponse=False,
             body=body,
         )
-        return request.execute()
+        return self._execute(request)
 
     def append_row(self, row: DecisionLogRow) -> Dict[str, Any]:
         return self.append_rows([row])
@@ -354,7 +366,7 @@ class DecisionLogSheetsClient:
             range=f"{self.tab_name}!A2:{last_col}{max_rows + 1}",
             valueRenderOption="UNFORMATTED_VALUE",
         )
-        values = request.execute().get("values", [])
+        values = self._execute(request).get("values", [])
         out: List[Dict[str, str]] = []
         for raw in values:
             padded = list(raw) + [""] * (len(DECISION_LOG_COLUMNS) - len(raw))
@@ -369,7 +381,26 @@ class DecisionLogSheetsClient:
             valueInputOption="RAW",
             body={"values": [list(DECISION_LOG_COLUMNS)]},
         )
-        return request.execute()
+        return self._execute(request)
+
+    @staticmethod
+    def _execute(request) -> Dict[str, Any]:
+        """Run a googleapiclient request, translating any failure.
+
+        The Sheets API only raises on ``.execute()`` -- auth refresh failures
+        (bad/revoked refresh token, e.g. ``google.auth.exceptions.RefreshError``)
+        and API errors (e.g. ``googleapiclient.errors.HttpError`` for a 403/404
+        from Google) both surface here. Previously neither was caught anywhere,
+        so they escaped as an unhandled exception and the service returned a
+        bare 500 with no detail. Wrapping them as ``SheetsClientError`` lets
+        service.py's existing 502 handler surface the real reason instead.
+        """
+        try:
+            return request.execute()
+        except Exception as exc:
+            raise SheetsClientError(
+                f"Google Sheets API call failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
 
 def _column_letter(index_1_based: int) -> str:

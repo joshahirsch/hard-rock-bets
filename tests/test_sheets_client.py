@@ -204,6 +204,63 @@ def test_missing_spreadsheet_id_is_an_error_not_a_default(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Real-API failures must not escape as a bare, undiagnosable 500.
+#
+# Before this, only our own SheetsClientError (missing credentials) was ever
+# caught anywhere. A live auth failure (e.g. a revoked OAuth refresh token --
+# google.auth.exceptions.RefreshError) or a live API error (e.g. a 403/404
+# from Google -- googleapiclient.errors.HttpError) both happen inside
+# request.execute(), which nothing wrapped. In production this surfaced as an
+# unhandled exception -> a bare 500 with no detail on GET /decision-log.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingExecutable:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def execute(self):
+        raise self._exc
+
+
+class _RefreshErrorLike(RuntimeError):
+    """Stand-in for google.auth.exceptions.RefreshError without the import."""
+
+
+def test_append_wraps_a_live_execute_failure_as_sheets_client_error(client):
+    c, api = client
+    api.append = lambda **kwargs: _RaisingExecutable(
+        _RefreshErrorLike("invalid_grant: Token has been expired or revoked.")
+    )
+    with pytest.raises(SheetsClientError) as exc_info:
+        c.append_row(sample_row())
+    message = str(exc_info.value)
+    assert "invalid_grant" in message
+    assert "_RefreshErrorLike" in message
+
+
+def test_read_rows_wraps_a_live_execute_failure_as_sheets_client_error(client):
+    c, api = client
+    api.get = lambda **kwargs: _RaisingExecutable(_RefreshErrorLike("403 Forbidden"))
+    with pytest.raises(SheetsClientError) as exc_info:
+        c.read_rows()
+    assert "403 Forbidden" in str(exc_info.value)
+
+
+def test_build_service_failure_is_wrapped_not_left_bare(monkeypatch):
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    c = DecisionLogSheetsClient(spreadsheet_id="TEST_SHEET_ID")
+
+    def _boom():
+        raise _RefreshErrorLike("could not build service")
+
+    monkeypatch.setattr(c, "_build_service", _boom)
+    with pytest.raises(SheetsClientError) as exc_info:
+        c._values_api()
+    assert "could not build service" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # Credential selection (service-account key vs. OAuth refresh token)
 #
 # OAuth exists as a fallback for orgs that block service-account key
