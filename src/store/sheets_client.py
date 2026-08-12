@@ -70,6 +70,16 @@ FORMULA_OWNED_COLUMN_INDICES = (11, 12)  # L, M
 DEFAULT_TAB_NAME = "Decision Log"
 SPREADSHEET_ID_ENV_VAR = "GOOGLE_SHEETS_SPREADSHEET_ID"
 CREDENTIALS_ENV_VAR = "GOOGLE_APPLICATION_CREDENTIALS"
+#: OAuth alternative to a service-account key -- see
+#: scripts/get_oauth_refresh_token.py. Used only if CREDENTIALS_ENV_VAR isn't
+#: set. Exists because some Google Cloud orgs enforce
+#: `iam.disableServiceAccountKeyCreation` with no project-level override
+#: available to a non-org-admin account -- a real failure mode hit standing
+#: up this project's own org, not a hypothetical one.
+OAUTH_CLIENT_ID_ENV_VAR = "GOOGLE_OAUTH_CLIENT_ID"
+OAUTH_CLIENT_SECRET_ENV_VAR = "GOOGLE_OAUTH_CLIENT_SECRET"
+OAUTH_REFRESH_TOKEN_ENV_VAR = "GOOGLE_OAUTH_REFRESH_TOKEN"
+OAUTH_TOKEN_URI = "https://oauth2.googleapis.com/token"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 #: ``Final Decision Type`` enum. "Bet" is never valid in shadow mode.
@@ -221,6 +231,9 @@ class DecisionLogSheetsClient:
         spreadsheet_id: Optional[str] = None,
         tab_name: str = DEFAULT_TAB_NAME,
         credentials_path: Optional[str] = None,
+        oauth_client_id: Optional[str] = None,
+        oauth_client_secret: Optional[str] = None,
+        oauth_refresh_token: Optional[str] = None,
         service: Any = None,
     ) -> None:
         self.spreadsheet_id = spreadsheet_id or os.environ.get(SPREADSHEET_ID_ENV_VAR)
@@ -231,6 +244,13 @@ class DecisionLogSheetsClient:
             )
         self.tab_name = tab_name
         self.credentials_path = credentials_path or os.environ.get(CREDENTIALS_ENV_VAR)
+        self.oauth_client_id = oauth_client_id or os.environ.get(OAUTH_CLIENT_ID_ENV_VAR)
+        self.oauth_client_secret = oauth_client_secret or os.environ.get(
+            OAUTH_CLIENT_SECRET_ENV_VAR
+        )
+        self.oauth_refresh_token = oauth_refresh_token or os.environ.get(
+            OAUTH_REFRESH_TOKEN_ENV_VAR
+        )
         self._service = service
 
     # -- wiring ------------------------------------------------------------
@@ -239,23 +259,53 @@ class DecisionLogSheetsClient:
             self._service = self._build_service()
         return self._service.spreadsheets().values()
 
+    @property
+    def _has_oauth_credentials(self) -> bool:
+        return bool(
+            self.oauth_client_id and self.oauth_client_secret and self.oauth_refresh_token
+        )
+
     def _build_service(self):  # pragma: no cover - requires real credentials
         try:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
         except ImportError as exc:
             raise SheetsClientError(
                 "google-api-python-client and google-auth are required; "
                 "`pip install -r requirements.txt`"
             ) from exc
-        if not self.credentials_path:
-            raise SheetsClientError(
-                f"missing service-account credentials: set {CREDENTIALS_ENV_VAR}"
-            )
-        creds = service_account.Credentials.from_service_account_file(
-            self.credentials_path, scopes=[SHEETS_SCOPE]
-        )
+        creds = self._build_credentials()
         return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    def _build_credentials(self):  # pragma: no cover - requires real credentials
+        # Prefer a service-account key when one is configured: it's the
+        # simpler, non-expiring option and was the original design. Fall back
+        # to OAuth user credentials (see scripts/get_oauth_refresh_token.py)
+        # for environments where Google Cloud's own org policy blocks service
+        # account key creation and there's no admin available to override it.
+        if self.credentials_path:
+            from google.oauth2 import service_account
+
+            return service_account.Credentials.from_service_account_file(
+                self.credentials_path, scopes=[SHEETS_SCOPE]
+            )
+        if self._has_oauth_credentials:
+            from google.oauth2.credentials import Credentials as OAuthCredentials
+
+            return OAuthCredentials(
+                token=None,
+                refresh_token=self.oauth_refresh_token,
+                token_uri=OAUTH_TOKEN_URI,
+                client_id=self.oauth_client_id,
+                client_secret=self.oauth_client_secret,
+                scopes=[SHEETS_SCOPE],
+            )
+        raise SheetsClientError(
+            f"missing Google credentials: set either {CREDENTIALS_ENV_VAR} (a "
+            f"service-account key file path) or all three of "
+            f"{OAUTH_CLIENT_ID_ENV_VAR}/{OAUTH_CLIENT_SECRET_ENV_VAR}/"
+            f"{OAUTH_REFRESH_TOKEN_ENV_VAR} (see "
+            "scripts/get_oauth_refresh_token.py to generate a refresh token)"
+        )
 
     # -- writes ------------------------------------------------------------
     def append_rows(self, rows: Sequence[DecisionLogRow]) -> Dict[str, Any]:

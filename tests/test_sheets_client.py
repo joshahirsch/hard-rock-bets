@@ -201,3 +201,98 @@ def test_missing_spreadsheet_id_is_an_error_not_a_default(monkeypatch):
     monkeypatch.delenv("GOOGLE_SHEETS_SPREADSHEET_ID", raising=False)
     with pytest.raises(SheetsClientError):
         DecisionLogSheetsClient()
+
+
+# ---------------------------------------------------------------------------
+# Credential selection (service-account key vs. OAuth refresh token)
+#
+# OAuth exists as a fallback for orgs that block service-account key
+# creation outright (iam.disableServiceAccountKeyCreation) with no
+# project-level override available to a non-org-admin account.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_all_credentials_names_both_options(monkeypatch):
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    for var in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_REFRESH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    c = DecisionLogSheetsClient()
+    with pytest.raises(SheetsClientError) as exc_info:
+        c._build_credentials()
+    message = str(exc_info.value)
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in message
+    assert "GOOGLE_OAUTH_CLIENT_ID" in message
+    assert "GOOGLE_OAUTH_REFRESH_TOKEN" in message
+
+
+def test_partial_oauth_credentials_do_not_count(monkeypatch):
+    # All three or none -- two out of three must not silently pass.
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.delenv("GOOGLE_OAUTH_REFRESH_TOKEN", raising=False)
+    c = DecisionLogSheetsClient()
+    assert c._has_oauth_credentials is False
+    with pytest.raises(SheetsClientError):
+        c._build_credentials()
+
+
+def test_oauth_credentials_used_when_no_service_account_path(monkeypatch):
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "refresh-token")
+    c = DecisionLogSheetsClient()
+    assert c._has_oauth_credentials is True
+    creds = c._build_credentials()
+    assert creds.client_id == "client-id"
+    assert creds.client_secret == "client-secret"
+    assert creds.refresh_token == "refresh-token"
+    assert creds.token_uri == "https://oauth2.googleapis.com/token"
+
+
+def test_service_account_path_preferred_over_oauth_when_both_set(monkeypatch, tmp_path):
+    # Service-account key is the simpler, non-expiring option -- if someone
+    # has both configured (e.g. mid-migration), prefer it deterministically
+    # rather than picking one arbitrarily.
+    import json
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    fake_key = tmp_path / "fake-service-account.json"
+    fake_key.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "test",
+                "private_key_id": "abc",
+                "private_key": pem,
+                "client_email": "test@test.iam.gserviceaccount.com",
+                "client_id": "1",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        )
+    )
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "TEST_SHEET_ID")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "refresh-token")
+    c = DecisionLogSheetsClient(credentials_path=str(fake_key))
+    creds = c._build_credentials()
+    # google.oauth2.service_account.Credentials, not oauth2.credentials.Credentials
+    assert type(creds).__module__.endswith("service_account")

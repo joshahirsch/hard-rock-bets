@@ -61,6 +61,13 @@ from src.math.novig import (
     no_vig_probability,
     overround,
 )
+from src.store.sheets_client import (
+    CREDENTIALS_ENV_VAR,
+    OAUTH_CLIENT_ID_ENV_VAR,
+    OAUTH_CLIENT_SECRET_ENV_VAR,
+    OAUTH_REFRESH_TOKEN_ENV_VAR,
+    SPREADSHEET_ID_ENV_VAR,
+)
 
 app = FastAPI(
     title="Hard Rock Bet research pipeline",
@@ -84,12 +91,26 @@ SHADOW_MODE_BANNER = (
 
 @app.get("/healthz")
 def healthz() -> Dict[str, Any]:
+    has_service_account = bool(os.environ.get(CREDENTIALS_ENV_VAR))
+    has_oauth = bool(
+        os.environ.get(OAUTH_CLIENT_ID_ENV_VAR)
+        and os.environ.get(OAUTH_CLIENT_SECRET_ENV_VAR)
+        and os.environ.get(OAUTH_REFRESH_TOKEN_ENV_VAR)
+    )
     return {
         "status": "ok",
         "version": __version__,
         "shadow_mode": True,
         "odds_api_key_configured": bool(os.environ.get("OWLS_INSIGHT_API_KEY")),
-        "sheets_configured": bool(os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")),
+        # True only once BOTH a spreadsheet id AND a working credential path
+        # (service-account key OR OAuth refresh token) are present. Checking
+        # the spreadsheet id alone, as this used to, would silently claim
+        # "configured" with no way to actually authenticate.
+        "sheets_configured": bool(os.environ.get(SPREADSHEET_ID_ENV_VAR))
+        and (has_service_account or has_oauth),
+        "sheets_credential_mode": (
+            "service_account" if has_service_account else "oauth" if has_oauth else None
+        ),
     }
 
 
