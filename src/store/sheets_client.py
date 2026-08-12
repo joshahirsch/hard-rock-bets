@@ -102,6 +102,31 @@ class SheetsClientError(RuntimeError):
     pass
 
 
+def _describe_api_exception(exc: Exception) -> str:
+    """Best-effort human-readable detail for a googleapiclient/google-auth error.
+
+    ``str(exc)`` alone is unreliable here: a ``googleapiclient.errors.HttpError``
+    can stringify to almost nothing (e.g. just "HttpError: ") depending on the
+    google-api-python-client version and whether the response had a JSON body,
+    even though the exception carries a real HTTP status code and Google's own
+    error body on ``.resp``/``.content``. Pull those out explicitly when present
+    so a caller sees e.g. "HTTP 403: PERMISSION_DENIED ..." instead of nothing.
+    """
+    parts = [type(exc).__name__]
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    content = getattr(exc, "content", None)
+    if content:
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        parts.append(str(content).strip())
+    text = str(exc).strip()
+    if text and text not in parts:
+        parts.append(text)
+    return ": ".join(parts) if len(parts) > 1 else f"{parts[0]} (no further detail available)"
+
+
 # ---------------------------------------------------------------------------
 # ULID
 # ---------------------------------------------------------------------------
@@ -273,7 +298,7 @@ class DecisionLogSheetsClient:
                 # so callers (service.py's 503 handler) see what actually
                 # went wrong.
                 raise SheetsClientError(
-                    f"failed to build Sheets API client: {type(exc).__name__}: {exc}"
+                    f"failed to build Sheets API client: {_describe_api_exception(exc)}"
                 ) from exc
         return self._service.spreadsheets().values()
 
@@ -399,7 +424,7 @@ class DecisionLogSheetsClient:
             return request.execute()
         except Exception as exc:
             raise SheetsClientError(
-                f"Google Sheets API call failed: {type(exc).__name__}: {exc}"
+                f"Google Sheets API call failed: {_describe_api_exception(exc)}"
             ) from exc
 
 

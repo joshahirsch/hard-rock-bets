@@ -260,6 +260,46 @@ def test_build_service_failure_is_wrapped_not_left_bare(monkeypatch):
     assert "could not build service" in str(exc_info.value)
 
 
+class _Resp:
+    def __init__(self, status):
+        self.status = status
+
+
+class _HttpErrorLike(Exception):
+    """Stand-in for googleapiclient.errors.HttpError.
+
+    The real HttpError carries the useful detail on .resp.status and .content
+    rather than in str(exc) -- in some versions str(exc) is nearly empty (this
+    is exactly what showed up live: "HttpError: " with nothing after it). This
+    reproduces that shape so _describe_api_exception is tested against it.
+    """
+
+    def __init__(self, status, content, str_repr=""):
+        super().__init__(str_repr)
+        self.resp = _Resp(status)
+        self.content = content
+
+    def __str__(self):
+        return ""  # reproduces the observed empty stringification
+
+
+def test_http_error_with_empty_str_still_surfaces_status_and_body(client):
+    c, api = client
+    api.get = lambda **kwargs: _RaisingExecutable(
+        _HttpErrorLike(
+            403,
+            b'{"error": {"code": 403, "message": "The caller does not have permission"}}',
+        )
+    )
+    with pytest.raises(SheetsClientError) as exc_info:
+        c.read_rows()
+    message = str(exc_info.value)
+    # Before this fix, an exception like this stringified to "HttpError: "
+    # with nothing useful after it -- exactly what showed up live.
+    assert "HTTP 403" in message
+    assert "does not have permission" in message
+
+
 # ---------------------------------------------------------------------------
 # Credential selection (service-account key vs. OAuth refresh token)
 #
