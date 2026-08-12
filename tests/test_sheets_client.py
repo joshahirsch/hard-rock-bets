@@ -17,6 +17,7 @@ from src.store.sheets_client import (
     DecisionLogRow,
     DecisionLogSheetsClient,
     SheetsClientError,
+    _a1_range,
     generate_decision_id,
     generate_ulid,
 )
@@ -166,7 +167,10 @@ def test_append_uses_values_append_with_insert_rows(client):
     assert method == "append"
     assert kwargs["insertDataOption"] == "INSERT_ROWS"
     assert kwargs["valueInputOption"] == "RAW"
-    assert kwargs["range"] == "Decision Log!A1"
+    # The default tab name "Decision Log" has a space, so A1 notation
+    # requires it be single-quoted -- an unquoted range here is exactly what
+    # caused the live 400 INVALID_ARGUMENT on every /decision-log call.
+    assert kwargs["range"] == "'Decision Log'!A1"
     assert kwargs["spreadsheetId"] == "TEST_SHEET_ID"
 
 
@@ -177,6 +181,35 @@ def test_append_never_computes_a_row_index(client):
     # The range is a bare anchor -- the server picks the insertion point.
     assert kwargs["range"].endswith("!A1")
     assert len(kwargs["body"]["values"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# A1-notation range building
+#
+# The Google Sheets API requires a sheet/tab name to be single-quoted in A1
+# notation whenever it contains a space or other special character -- an
+# unquoted "Decision Log!A1" is REJECTED with 400 INVALID_ARGUMENT. This was
+# the actual root cause of every live /decision-log call failing, once the
+# separate auth/exception-wrapping issues were fixed: the default tab name is
+# "Decision Log", which has a space, and every range was built unquoted.
+# ---------------------------------------------------------------------------
+
+
+def test_a1_range_quotes_a_tab_name_with_a_space():
+    assert _a1_range("Decision Log", "A1") == "'Decision Log'!A1"
+
+
+def test_a1_range_leaves_a_simple_tab_name_unquoted():
+    # Quoting a name that doesn't need it is harmless in the real API, but
+    # asserting the simple case stays bare keeps this helper's behavior
+    # legible and catches accidental over-quoting.
+    assert _a1_range("Sheet1", "A2:Y5001") == "Sheet1!A2:Y5001"
+
+
+def test_a1_range_escapes_an_embedded_single_quote():
+    # A1 notation escapes a literal ' inside a quoted sheet name by doubling
+    # it, same as most SQL dialects escape a literal quote character.
+    assert _a1_range("Josh's Log", "A1") == "'Josh''s Log'!A1"
 
 
 def test_client_exposes_no_update_or_delete_for_existing_rows():

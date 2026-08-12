@@ -30,6 +30,7 @@ MUST be written as empty strings. Putting text in them breaks the spill with
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import time
 from dataclasses import asdict, dataclass, field
@@ -366,7 +367,7 @@ class DecisionLogSheetsClient:
         body = {"values": [r.to_values() for r in rows]}
         request = self._values_api().append(
             spreadsheetId=self.spreadsheet_id,
-            range=f"{self.tab_name}!A1",
+            range=_a1_range(self.tab_name, "A1"),
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             includeValuesInResponse=False,
@@ -388,7 +389,7 @@ class DecisionLogSheetsClient:
         last_col = _column_letter(len(DECISION_LOG_COLUMNS))
         request = self._values_api().get(
             spreadsheetId=self.spreadsheet_id,
-            range=f"{self.tab_name}!A2:{last_col}{max_rows + 1}",
+            range=_a1_range(self.tab_name, f"A2:{last_col}{max_rows + 1}"),
             valueRenderOption="UNFORMATTED_VALUE",
         )
         values = self._execute(request).get("values", [])
@@ -402,7 +403,7 @@ class DecisionLogSheetsClient:
         """Write the A-Y header row. Safe to call on a fresh, empty tab only."""
         request = self._values_api().update(
             spreadsheetId=self.spreadsheet_id,
-            range=f"{self.tab_name}!A1",
+            range=_a1_range(self.tab_name, "A1"),
             valueInputOption="RAW",
             body={"values": [list(DECISION_LOG_COLUMNS)]},
         )
@@ -435,3 +436,29 @@ def _column_letter(index_1_based: int) -> str:
         n, rem = divmod(n - 1, 26)
         letters = chr(65 + rem) + letters
     return letters
+
+
+#: Sheet/tab names made only of these characters never need quoting in A1
+#: notation. Anything else -- most importantly a space, as in the default
+#: tab name "Decision Log" -- does.
+_UNQUOTED_SHEET_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _a1_range(tab_name: str, cell_range: str) -> str:
+    """Build an ``A1`` range, quoting the sheet name when A1 notation requires it.
+
+    This is the actual root cause of the live 400 INVALID_ARGUMENT ("Request
+    contains an invalid argument") every /decision-log call was hitting: every
+    range was built as a bare ``f"{tab_name}!..."``, and the Google Sheets API
+    rejects an unquoted sheet name that contains a space (or other special
+    character) in A1 notation -- it must be wrapped in single quotes, e.g.
+    ``'Decision Log'!A1``, with any literal ``'`` in the name doubled. The
+    default tab name, "Decision Log", has a space, so this fired on every
+    single append_rows/read_rows/ensure_header call once auth (fixed
+    separately) was no longer the blocker.
+    """
+    if _UNQUOTED_SHEET_NAME_RE.match(tab_name):
+        sheet = tab_name
+    else:
+        sheet = "'" + tab_name.replace("'", "''") + "'"
+    return f"{sheet}!{cell_range}"
