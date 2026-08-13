@@ -10,6 +10,7 @@ naive "read one key" implementation would produce a one-book view and fail.
 import pytest
 
 from src.fetch.owls_insight import (
+    CONFIRMED_SPORT_KEYS,
     DEFAULT_BOOKMAKER_PREFERENCE,
     DEFAULT_KEEP_BOOKS,
     HARD_ROCK_BOOK_KEY,
@@ -17,6 +18,19 @@ from src.fetch.owls_insight import (
     find_event,
     normalize_odds_response,
 )
+
+
+def test_confirmed_sport_keys_are_the_short_owls_form_not_the_odds_api_form():
+    """mlb/nfl/ncaaf confirmed live 2026-08-11..2026-08-13 -- see
+    claude/v3-learning-engine-proposal-2026-08-13.md §2c. Guards against
+    someone "fixing" these to the-odds-api.com's longer naming
+    (americanfootball_nfl/americanfootball_ncaaf), which is what Owls Insight
+    echoes back in each event's own sport_key field but is NOT the URL path
+    slug that actually works.
+    """
+    assert set(CONFIRMED_SPORT_KEYS) == {"mlb", "nfl", "ncaaf"}
+    assert all("americanfootball" not in k for k in CONFIRMED_SPORT_KEYS)
+    assert all("_" not in k for k in CONFIRMED_SPORT_KEYS)
 
 EVENT_ID = "evt-blue-jays-red-sox"
 BOOK_PRICES = {

@@ -63,9 +63,21 @@ DEFAULT_BOOKMAKER_PREFERENCE: Sequence[str] = (
     "pinnacle",
 )
 
-#: Only ``mlb`` has been live-confirmed. Guessing a slug is exactly the kind of
-#: silent substitution this project's conventions prohibit -- test each new one.
-CONFIRMED_SPORT_KEYS = ("mlb",)
+#: Live-confirmed sport-key slugs for Owls Insight's ``GET /api/v1/{sport}/odds``
+#: URL path. Guessing a slug is exactly the kind of silent substitution this
+#: project's conventions prohibit -- each one here was confirmed with a real
+#: call returning real event data, not assumed from another vendor's naming.
+#:
+#: ``mlb`` confirmed 2026-08-11/2026-08-12 (v1 cutover). ``nfl`` and ``ncaaf``
+#: confirmed 2026-08-13 (292 and 186 real 2026-season events respectively,
+#: including a same-day live check by Josh via PowerShell -- see
+#: ``claude/v3-learning-engine-proposal-2026-08-13.md`` §2c). NOTE: Owls
+#: Insight's own per-event ``sport_key`` field echoes back the-odds-api.com's
+#: longer naming (``americanfootball_nfl`` / ``americanfootball_ncaaf``) --
+#: that's just Owls' internal label copied from its upstream data source, NOT
+#: the URL path slug. The URL path slug that actually works is the short form
+#: below; do not confuse the two or "fix" this to the longer string.
+CONFIRMED_SPORT_KEYS = ("mlb", "nfl", "ncaaf")
 
 
 class OwlsInsightError(RuntimeError):

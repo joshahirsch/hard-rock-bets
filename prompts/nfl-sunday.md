@@ -6,12 +6,11 @@ capability to do so.
 Service base URL: `https://hard-rock-bets.fly.dev`
 Rulebook: `docs/spec.md`, `claude/research-contract.md` §5 NFL checklist.
 
-**⚠️ UNCONFIRMED SPORT KEY.** Only `mlb` has ever been live-confirmed against
-Owls Insight. The sport key below (`nfl`) is an educated guess — confirm it
-with a manual test call before this trigger's first real run (try
-`americanfootball_nfl` if `nfl` 404s or returns empty on a Sunday with real
-games) — see `claude/v3-learning-engine-proposal-2026-08-13.md`. Do not assume
-it's right just because it looks plausible.
+Sport key `nfl` confirmed live against Owls Insight 2026-08-13 (292 events
+returned, real 2026 season slate starting 2026-09-13). Note Owls Insight's own
+`sport_key` field on each event reads `americanfootball_nfl` — that's just
+Owls' internal label; the URL path slug that actually works is the short
+`nfl`, not that longer string.
 
 Note: the NFL is explicitly **out of scope** for the soft-book/thin-market
 priced-in guidance (`research-contract.md` §3a) — it carries enough betting

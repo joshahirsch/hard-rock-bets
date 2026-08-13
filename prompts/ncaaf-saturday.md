@@ -6,15 +6,11 @@ capability to do so.
 Service base URL: `https://hard-rock-bets.fly.dev`
 Rulebook: `docs/spec.md`, `claude/research-contract.md` §5 CFB checklist.
 
-**⚠️ UNCONFIRMED SPORT KEY.** Only `mlb` has ever been live-confirmed against
-Owls Insight. The sport key below (`ncaaf`) is an educated guess, not a
-verified value — before this trigger has ever run for real, confirm the real
-key with a manual test call (`POST /odds/ncaaf` and check for a nonzero
-`event_count` on a real game day; if it 404s or returns empty on a day CFB is
-definitely being played, try `americanfootball_ncaaf`, `cfb`, or
-`college_football` and update every occurrence below once confirmed — see
-`claude/v3-learning-engine-proposal-2026-08-13.md`). Do not assume this key is
-right just because it looks plausible.
+Sport key `ncaaf` confirmed live against Owls Insight 2026-08-13 (186 events
+returned, real 2026 season slate starting 2026-08-29). Note Owls Insight's own
+`sport_key` field on each event reads `americanfootball_ncaaf` — that's just
+Owls' internal label; the URL path slug that actually works is the short
+`ncaaf`, not that longer string.
 
 ---
 

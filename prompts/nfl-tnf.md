@@ -12,8 +12,10 @@ smoothed over.
 Service base URL: `https://hard-rock-bets.fly.dev`
 Rulebook: `docs/spec.md`, `claude/research-contract.md` §5 NFL checklist.
 
-**⚠️ UNCONFIRMED SPORT KEY** — same caveat as `nfl-sunday.md`. Confirm `nfl`
-(or the real key, once found) before this trigger's first real run.
+Sport key `nfl` confirmed live against Owls Insight 2026-08-13 (292 events
+returned, real 2026 season slate). Owls' own `sport_key` event field reads
+`americanfootball_nfl` — that's just their internal label; the URL path slug
+that actually works is the short `nfl`.
 
 NFL is out of scope for the §3a soft-book priced-in recalibration.
 
