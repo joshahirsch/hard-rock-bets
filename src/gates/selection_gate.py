@@ -1,7 +1,8 @@
 """Selection Gate G1-G6.
 
 Faithful port of ``claude/selection-gate-spec.md`` §2-§4 (Phase 5,
-AUTHORITATIVE, as amended by the 2026-08-11 restructuring).
+AUTHORITATIVE, as amended by the 2026-08-11 restructuring and the 2026-08-13
+G4 change -- see ``claude/v3-learning-engine-proposal-2026-08-13.md``).
 
 This is a research-quality classification only. It is never a bet
 authorization and this module never executes anything.
@@ -34,6 +35,21 @@ G2_BAND_CEILING_PP = 6.00
 #: The pre-2026-08-11 G1 value, retained for provenance and for tests that
 #: exercise the spec's own (historical) worked demonstration in §10a.
 G1_EDGE_FLOOR_PP_PRE_20260811 = 3.00
+
+#: G4 -- minimum count of nonzero-weight Tier-2 adjustments that may substitute
+#: for a Tier-1 anchor. CHANGED on 2026-08-13: on 2026-08-11, Josh was offered
+#: exactly this loosening ("accepting 2+ corroborating Tier-2 sources in place
+#: of a Tier-1 anchor") and did NOT select it -- G4 was explicitly left as
+#: Tier-1-only. On 2026-08-13, as part of the v3 season-aware-triggers/
+#: learning-engine rebuild ("I don't want so many guardrails that nothing
+#: happens"), Josh asked for G4 to be specifically audited, and this is that
+#: previously-designed, previously-declined alternative now adopted. Each
+#: nonzero-weight Tier-2 adjustment here is already known to trace to a
+#: distinct underlying fact -- Step 3.5 merges same-fact adjustments
+#: (fair-probability-spec.md's shared-cause rule) before they ever reach the
+#: gate, so 2 remaining Tier-2 adjustments here means 2 independently sourced
+#: facts, not one fact double-counted.
+G4_MIN_COROBORATING_TIER2_COUNT = 2
 
 GATE_RULE_ORDER = ("G1", "G2", "G3", "G4", "G5", "G6")
 
@@ -188,14 +204,30 @@ def evaluate_selection_gate(
                 "checklist compliance."
             )
 
-    # -- G4: Tier anchor ----------------------------------------------------
+    # -- G4: Tier anchor (or 2+ corroborating Tier-2, since 2026-08-13) ------
     tiers = inputs.nonzero_weight_adjustment_tiers
-    ok = any(t is Tier.TIER1 for t in tiers)
+    has_tier1 = any(t is Tier.TIER1 for t in tiers)
+    tier2_count = sum(1 for t in tiers if t is Tier.TIER2)
+    has_tier2_corroboration = tier2_count >= G4_MIN_COROBORATING_TIER2_COUNT
+    ok = has_tier1 or has_tier2_corroboration
+    if has_tier1:
+        detail = "At least one Tier 1 anchor present."
+    elif has_tier2_corroboration:
+        detail = (
+            f"No Tier 1 anchor, but {tier2_count} independently-sourced "
+            f"nonzero-weight Tier 2 adjustments corroborate "
+            f"(>= {G4_MIN_COROBORATING_TIER2_COUNT} required, 2026-08-13 change)."
+        )
+    else:
+        detail = (
+            "No Tier 1 anchor among nonzero-weight adjustments, and fewer than "
+            f"{G4_MIN_COROBORATING_TIER2_COUNT} corroborating Tier 2 adjustments "
+            f"({tier2_count} present)."
+        )
     results.append(RuleResult(
         "G4", "Tier anchor", ok,
         f"Nonzero-weight adjustment tiers: {[t.value for t in tiers] or 'none'}. "
-        + ("At least one Tier 1 anchor present." if ok
-           else "No Tier 1 anchor among nonzero-weight adjustments."),
+        + detail,
     ))
 
     # -- G5: skeptical-pass reconfirmation ----------------------------------

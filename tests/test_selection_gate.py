@@ -154,16 +154,35 @@ def test_g3_accepts_an_explicitly_not_applicable_conditional_item():
     assert v.cleared is True
 
 
-def test_g4_requires_a_tier1_anchor_among_nonzero_weight_adjustments():
+def test_g4_fails_a_single_tier2_only_case():
+    v = evaluate_selection_gate(
+        demo_10a_inputs(
+            edge_low_pp=4.0, nonzero_weight_adjustment_tiers=[Tier.TIER2]
+        )
+    )
+    assert v.deciding_rule == "G4"
+    # A strong edge and a narrow band do not rescue a lone-Tier-2 case.
+    passed = {r.rule for r in v.all_rule_results if r.passed}
+    assert {"G1", "G2", "G3", "G5"} <= passed
+
+
+def test_g4_passes_on_two_corroborating_tier2_adjustments_since_20260813():
+    """2026-08-13 change: 2+ Tier-2 adjustments substitute for a Tier-1 anchor.
+
+    Josh was offered this exact loosening on 2026-08-11 and declined it; he
+    asked for G4 to be specifically audited on 2026-08-13 as part of the v3
+    rebuild, and this is that previously-designed alternative now adopted --
+    see claude/v3-learning-engine-proposal-2026-08-13.md.
+    """
     v = evaluate_selection_gate(
         demo_10a_inputs(
             edge_low_pp=4.0, nonzero_weight_adjustment_tiers=[Tier.TIER2, Tier.TIER2]
         )
     )
-    assert v.deciding_rule == "G4"
-    # A strong edge and a narrow band do not rescue a Tier-2-only case.
-    passed = {r.rule for r in v.all_rule_results if r.passed}
-    assert {"G1", "G2", "G3", "G5"} <= passed
+    assert v.cleared is True
+    g4 = next(r for r in v.all_rule_results if r.rule == "G4")
+    assert g4.passed is True
+    assert "corroborate" in g4.detail
 
 
 def test_g5_requires_the_literal_survives():

@@ -73,6 +73,13 @@ from src.store.sheets_client import (
     SheetsClientError,
     generate_decision_id,
 )
+from src.store.outcomes_client import (
+    RESULT_VALUES,
+    OutcomeRow,
+    OutcomesSheetsClient,
+    generate_outcome_id,
+)
+from src.calibration import build_calibration_report
 
 app = FastAPI(
     title="Hard Rock Bet research pipeline",
@@ -765,4 +772,141 @@ def read_decision_log(max_rows: int = 5000) -> Dict[str, Any]:
         "banner": SHADOW_MODE_BANNER,
         "row_count": len(rows),
         "rows": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /outcomes -- the learning engine's raw material.
+#
+# Added 2026-08-13 (claude/v3-learning-engine-proposal-2026-08-13.md). The
+# Decision Log records a classification; nothing before this recorded what
+# actually happened. Separate append-only tab, same atomic-append discipline
+# as the Decision Log -- see src/store/outcomes_client.py's module docstring
+# for why this is a new tab rather than new Decision Log columns.
+# ---------------------------------------------------------------------------
+
+
+def _outcomes_client() -> OutcomesSheetsClient:
+    try:
+        return OutcomesSheetsClient()
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+class OutcomeAppendRequest(BaseModel):
+    """Record ONE fact about a bet: that it was placed, or that it resolved.
+
+    No ``outcome_id`` field -- generated server-side, same ULID scheme as
+    Decision IDs, for the same collision-free reason.
+    """
+
+    decision_id: str = Field(
+        ..., description="The Decision Log row this outcome refers back to."
+    )
+    placed: str = Field(..., description="Y | N")
+    placed_stake_usd: str = ""
+    placed_odds: str = ""
+    placed_at_et: str = ""
+    result: str = "PENDING"
+    resolved_at_et: str = ""
+    closing_line_odds: str = ""
+    notes: str = ""
+
+
+@app.post("/outcomes/append")
+def append_outcome(req: OutcomeAppendRequest) -> Dict[str, Any]:
+    """Atomically append one row to the Outcomes log.
+
+    Call this twice for a bet that gets placed and later resolves: once at
+    placement time (``placed="Y"``, ``result="PENDING"``), and again once the
+    game ends (a fresh row with the resolved ``result``). Never edit a prior
+    Outcomes row -- same append-only discipline as the Decision Log.
+    """
+    if req.placed not in ("Y", "N"):
+        raise HTTPException(
+            status_code=422, detail=f"invalid placed {req.placed!r}; expected 'Y' or 'N'"
+        )
+    if req.result not in RESULT_VALUES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid result {req.result!r}; expected one of {RESULT_VALUES}",
+        )
+    client = _outcomes_client()
+    row = OutcomeRow(
+        outcome_id=generate_outcome_id(),
+        decision_id=req.decision_id,
+        placed=req.placed,
+        placed_stake_usd=req.placed_stake_usd,
+        placed_odds=req.placed_odds,
+        placed_at_et=req.placed_at_et,
+        result=req.result,
+        resolved_at_et=req.resolved_at_et,
+        closing_line_odds=req.closing_line_odds,
+        notes=req.notes,
+    )
+    try:
+        result = client.append_rows([row])
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "banner": SHADOW_MODE_BANNER,
+        "outcome_id": row.outcome_id,
+        "sheets_response": result,
+    }
+
+
+@app.get("/outcomes")
+def read_outcomes(max_rows: int = 20000) -> Dict[str, Any]:
+    """Read back the live Outcomes log.
+
+    The calibration job's raw material (§4 of the v3 proposal): for a given
+    ``decision_id``, the LAST row with a non-PENDING result is that bet's true
+    outcome -- callers do this reduction themselves rather than the service
+    silently picking a "current" row, since there is no update semantics here
+    to silently pick one from.
+    """
+    client = _outcomes_client()
+    try:
+        rows = client.read_rows(max_rows=max_rows)
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "banner": SHADOW_MODE_BANNER,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /calibration-report -- the learning engine's read-only analysis step.
+#
+# Added 2026-08-13 (claude/v3-learning-engine-proposal-2026-08-13.md §4b).
+# Joins the Decision Log and Outcomes tabs and reports hit rate / ROI / CLV,
+# grouped by what the existing schema actually supports (Final Decision Type,
+# and deciding rule where parseable). Deliberately read-only: this endpoint
+# never writes to config.yaml or any sheet. Josh reads it and decides whether
+# a threshold change is warranted, as a normal git-diffable config edit.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/calibration-report")
+def calibration_report(max_rows: int = 20000) -> Dict[str, Any]:
+    """Build the calibration report from the live Decision Log + Outcomes tabs.
+
+    Read-only: fetches both tabs fresh, joins them in `build_calibration_report`
+    (a pure function, unit-tested independently in tests/test_calibration.py),
+    and returns the resulting hit-rate/ROI/CLV breakdown. Never mutates
+    config.yaml or either sheet.
+    """
+    decision_log_client = _decision_log_client()
+    outcomes_client = _outcomes_client()
+    try:
+        decision_log_rows = decision_log_client.read_rows(max_rows=max_rows)
+        outcome_rows = outcomes_client.read_rows(max_rows=max_rows)
+    except SheetsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    report = build_calibration_report(decision_log_rows, outcome_rows)
+    return {
+        "banner": SHADOW_MODE_BANNER,
+        **report,
     }

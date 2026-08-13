@@ -248,7 +248,7 @@ failure — so it is auditable how *close* a failing candidate came.
 | **G1** | Edge floor | Conservative (band-low) edge **≥ +1.50 pp** |
 | **G2** | Band ceiling | Band width **≤ 6.00 pp** |
 | **G3** | Checklist reconfirmation | Every REQUIRED sport-checklist item explicitly MET |
-| **G4** | Tier anchor | At least one **nonzero-weight** adjustment is **Tier 1** |
+| **G4** | Tier anchor | At least one **nonzero-weight** adjustment is **Tier 1**, OR **2+** nonzero-weight adjustments are Tier 2 (corroborating; since 2026-08-13) |
 | **G5** | Skeptical-pass reconfirmation | Verdict is the literal **SURVIVES** |
 | **G6** | Fail-closed default | No required G1–G5 input missing, ambiguous, or inconsistent with the Step 3/3.5 write-up |
 
@@ -264,14 +264,25 @@ recalibration from data. The tension it creates is real and was accepted
 knowingly: **+1.50 pp now sits below the framework's own ±3 pp minimum band
 width**, so a G1-cleared candidate is no longer guaranteed to be distinguishable
 from the estimate's own irreducible noise floor. **G2 and G4 were explicitly
-offered as loosening options and NOT selected** — do not assume the
-restructuring touched anything beyond G1.
+offered as loosening options and NOT selected** at that time — the restructuring
+touched only G1.
+
+**2026-08-13 change to G4.** As part of the v3 season-aware-triggers/learning-
+engine rebuild ("I don't want so many guardrails that nothing happens"), Josh
+asked for G4 specifically to be audited. This is the exact alternative offered
+and declined on 2026-08-11, now adopted: **2+ nonzero-weight Tier-2
+adjustments may substitute for a Tier-1 anchor.** Each qualifying Tier-2
+adjustment is already known to trace to a distinct underlying fact — Step 3.5
+merges same-fact adjustments before they reach the gate — so this requires two
+independently-sourced facts, not one fact double-counted. See
+`claude/v3-learning-engine-proposal-2026-08-13.md` for the full reasoning and
+the flag that this reverses a decision Josh made two days earlier.
 
 G1 and G2 are independent: a candidate can clear one and fail the other in
 either direction. G4 is distinct from both: a strong edge and a narrow band
-built entirely from beat-writer reporting still fails for lack of a primary
-anchor. A G3 failure is itself a signal something upstream is inconsistent, so
-it also trips G6.
+built entirely from a single beat-writer report still fails for lack of a
+primary anchor or a second corroborating source. A G3 failure is itself a
+signal something upstream is inconsistent, so it also trips G6.
 
 ---
 
@@ -458,6 +469,65 @@ was checked and what was found.
 Decision IDs are ULID-suffixed (`HRB-YYYYMMDD-<ULID>`) — both replacing v1's
 read-count-and-compute pattern, which produced real collisions when firings
 overlapped. No row is ever edited retroactively.
+
+### 9a. Outcomes tab (added 2026-08-13)
+
+A second, separate append-only tab — `src/store/outcomes_client.py`,
+`POST /outcomes/append` / `GET /outcomes` — records what actually happened to
+a bet, which nothing before this tracked. **Not new Decision Log columns**:
+the Decision Log's append-only guarantee (no update/delete method exists on
+`DecisionLogSheetsClient`, by design) would have to be broken to record an
+outcome discovered days after the original row, so this is a linked row in
+its own tab instead, same atomic-append discipline.
+
+Columns A–J: `A` Outcome ID (`OUT-<ULID>`) · `B` Decision ID (FK, not
+enforced by Sheets) · `C` Placed (`Y`/`N`) · `D` Placed Stake USD ·
+`E` Placed Odds (the real slip price, may differ from the Decision Log's
+reference price) · `F` Placed At ET · `G` Result
+(`PENDING`/`WIN`/`LOSS`/`PUSH`/`VOID`) · `H` Resolved At ET ·
+`I` Closing Line Odds (for CLV) · `J` Notes.
+
+A bet gets **two** appended rows over its lifetime, never one edited: a
+placement row (`placed="Y"`, `result="PENDING"`) the moment Josh confirms he
+placed it, and a resolution row once the game ends. For a given
+`decision_id`, the calibration job (§9b) takes the **last** row with a
+non-PENDING result as the true outcome — callers do this reduction
+themselves; the service has no update semantics to pick one "current" row.
+
+This is the raw material `claude/v3-learning-engine-proposal-2026-08-13.md`
+§4 builds the calibration loop on top of — see that document for the full
+outcome-capture design and why it's Josh-confirms-placement,
+system-resolves-result rather than either end being fully automated.
+
+### 9b. Calibration report (added 2026-08-13)
+
+`src/calibration.py` (`build_calibration_report`, unit-tested in
+`tests/test_calibration.py`) is a pure, read-only function joining Decision
+Log rows to their resolved Outcomes rows and computing hit rate, ROI, and
+average CLV (pp), bucketed three ways: `overall`, `by_final_decision_type`,
+and `by_deciding_rule` (parsed from the Decision Log's free-text `Gate
+Outcome` column — `NOT CLEARED — G1: ...` groups under `G1`, a clean
+`CLEARED` groups under `CLEARED`). Exposed as `GET /calibration-report`,
+which fetches both tabs fresh and returns the report plus
+`unresolved_placed_count` (bets placed but not yet resolved) and
+`cleared_but_not_confirmed_placed_count` (candidates that cleared the gate
+but have no matching Outcomes row — either genuinely passed on or placed but
+not yet confirmed; the report can't tell which).
+
+**Deliberately not an auto-tuner.** This endpoint never writes to
+`config.yaml` or any sheet. It exists so Josh can look at real numbers
+(hit rate, ROI, which gate is doing the most rejecting) and decide whether a
+threshold change is warranted — same discipline as the 2026-08-13 G4 change
+(§4 above): a human reads evidence, then makes a normal git-diffable config
+edit. Below `MIN_SAMPLE_FOR_ANY_CONCLUSION` (20 decided bets) the report
+flags its own numbers as too small to act on; below
+`MIN_SAMPLE_FOR_A_REAL_CONCLUSION` (50) it's flagged as an early read only.
+
+**Known limitation, stated in the report itself:** the Decision Log schema
+stores narrative text, not structured numbers — there's no dedicated sport,
+edge-pp, or G4-path column, so grouping is limited to what the schema
+actually supports. `known_limitations` in the API response says so
+explicitly rather than implying false precision.
 
 ---
 
