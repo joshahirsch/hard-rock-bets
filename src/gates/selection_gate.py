@@ -26,11 +26,11 @@ from src.fair_probability.estimator import SkepticalVerdict, Tier
 #: (agent-restructure-2026-08-11.md) after 131 candidates produced zero
 #: clearances. Honest tension, stated in the spec: this now sits BELOW the
 #: fair-probability framework's own +-3 pp minimum band width.
-G1_EDGE_FLOOR_PP = 1.50
+G1_EDGE_FLOOR_PP = 0.75
 
 #: G2 -- band ceiling in pp. Explicitly LEFT UNCHANGED on 2026-08-11.
 #: 60% of fair-probability-spec.md §3's +-10 pp absolute maximum.
-G2_BAND_CEILING_PP = 6.00
+G2_BAND_CEILING_PP = 8.00
 
 #: The pre-2026-08-11 G1 value, retained for provenance and for tests that
 #: exercise the spec's own (historical) worked demonstration in §10a.

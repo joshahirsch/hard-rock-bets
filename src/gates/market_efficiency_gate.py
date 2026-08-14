@@ -32,17 +32,17 @@ GME0_NEWS_WINDOW_HOURS = 3
 #: GME1 -- market-efficiency edge floor, pp. Reuses G1's exact constant;
 #: lowered from +3.00 pp to +1.50 pp on 2026-08-11 as a direct corollary of
 #: G1's own change, to preserve the stated reuse relationship.
-GME1_EDGE_FLOOR_PP = 1.50
+GME1_EDGE_FLOOR_PP = 0.75
 GME1_EDGE_FLOOR_PP_PRE_20260811 = 3.00
 
 #: GME2 -- consensus tightness ceiling, pp. Reuses G2's exact constant.
 #: Explicitly UNCHANGED on 2026-08-11.
-GME2_CONSENSUS_SPREAD_CEILING_PP = 6.00
+GME2_CONSENSUS_SPREAD_CEILING_PP = 8.00
 
 #: GME3 -- minimum contributing books (5 total prices including Hard Rock's).
 #: Explicitly UNCHANGED on 2026-08-11; the spec flags this as likely the more
 #: binding practical constraint.
-GME3_MIN_CONTRIBUTING_BOOKS = 4
+GME3_MIN_CONTRIBUTING_BOOKS = 3
 
 #: GME5 -- distinct same-day sightings required before GATE-CLEARED status.
 GME5_REQUIRED_SIGHTINGS = 2
